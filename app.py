@@ -503,7 +503,7 @@ if not m7_df.empty:
         return 'color: #2e7d32;'
 
     st.dataframe(
-        m7_df.style.applymap(highlight_dd, subset=['고점 대비 하락률 (Drawdown)'])
+        m7_df.style.map(highlight_dd, subset=['고점 대비 하락률 (Drawdown)'])
                    .format({
                        "현재가 ($)": "${:.2f}",
                        "일간 변동률 (%)": "{:+.2f}%",
