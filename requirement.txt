@@ -1,6 +1,0 @@
-streamlit
-yfinance
-pandas
-requests
-google-generativeai
-altair
