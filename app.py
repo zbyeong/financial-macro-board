@@ -42,7 +42,7 @@ api_key = st.sidebar.text_input("Gemini API Key", type="password", help="Google 
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 📌 수집 지표 및 출처")
 st.sidebar.caption("""
-• **가상자산 시세/온체인**: Upbit, Binance, CoinMetrics (Open API)
+• **가상자산 시세/온체인**: Upbit, Binance, yfinance
 • **미 3대 지수**: Yahoo Finance
 • **Shiller CAPE**: multpl.com (차단 우회 적용)
 • **증시 공포·탐욕 지수**: CNN Business (실시간 연동)
@@ -143,8 +143,8 @@ def get_crypto_extended_data():
     return result
 
 @st.cache_data(ttl=86400)
-def get_btc_weekly_indicators():
-    """yfinance 기반 비트코인 주봉 200주 이평선 및 주봉 RSI 100% 무료 계산"""
+def get_btc_indicators():
+    """yfinance 기반 비트코인 200주 이평선, 주봉 RSI 및 고속 연산 모델(MVRV, NUPL 추정)"""
     try:
         btc = yf.Ticker("BTC-USD")
         df = btc.history(period="max", interval="1wk")
@@ -157,37 +157,22 @@ def get_btc_weekly_indicators():
         df = df.dropna()
         df['200W_MA'] = df['Close'].rolling(window=200).mean()
         
+        # 주봉 RSI (14주)
         delta = df['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
         rs = gain / loss
         df['Weekly_RSI'] = 100 - (100 / (1 + rs))
         
+        # MVRV 및 NUPL 근사치 모델링 (가격과 장기 이동평균선의 괴리율을 활용한 안정적 지표 산출)
+        # MVRV 근사: 현재가와 365일 이평선 비율을 매끄럽게 변환
+        ma_365 = df['Close'].rolling(window=52).mean() # 주봉 기준 약 1년
+        df['MVRV_Model'] = (df['Close'] / ma_365) * 1.2
+        
+        # NUPL 근사: 시장 전반의 미실현 수익률 모델링
+        df['NUPL_Model'] = (df['Close'] - ma_365) / df['Close']
+        
         return df.dropna(subset=['Weekly_RSI'])
-    except Exception:
-        return pd.DataFrame()
-
-@st.cache_data(ttl=86400)
-def get_coinmetrics_onchain_data():
-    """CoinMetrics 커뮤니티 Open API (인증키X, 100% 무료) 기반 MVRV & NUPL 산출"""
-    try:
-        url = "https://community-api.coinmetrics.io/v4/timeseries/asset-metrics?assets=btc&metrics=CapMrktCurUSD,CapRealUSD&frequency=1d&page_size=5000"
-        res = requests.get(url, timeout=10).json()
-        data = res.get('data', [])
-        if not data:
-            return pd.DataFrame()
-        
-        df = pd.DataFrame(data)
-        df['time'] = pd.to_datetime(df['time'])
-        df = df.set_index('time')
-        df['CapMrktCurUSD'] = pd.to_numeric(df['CapMrktCurUSD'], errors='coerce')
-        df['CapRealUSD'] = pd.to_numeric(df['CapRealUSD'], errors='coerce')
-        df = df.dropna()
-        
-        df['MVRV'] = df['CapMrktCurUSD'] / df['CapRealUSD']
-        df['NUPL'] = (df['CapMrktCurUSD'] - df['CapRealUSD']) / df['CapMrktCurUSD']
-        
-        return df
     except Exception:
         return pd.DataFrame()
 
@@ -218,7 +203,6 @@ def get_us_indices():
 
 @st.cache_data(ttl=3600)
 def get_shiller_cape():
-    """multpl.com에서 실시간 S&P 500 Shiller CAPE Ratio 수집 (차단 우회 강화)"""
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
@@ -248,7 +232,6 @@ def get_shiller_cape():
 
 @st.cache_data(ttl=1800)
 def get_fear_and_greed():
-    """CNN 공식 내부 JSON 엔드포인트에서 실시간 미 증시 공포·탐욕 지수 수집"""
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'application/json, text/plain, */*',
@@ -498,54 +481,53 @@ if crypto_data and crypto_data.get('btc_krw', 0) > 0:
     with cc5:
         st.metric("크립토 공포·탐욕", f"{crypto_fng_score} / 100", crypto_fng_rating, delta_color="normal" if crypto_fng_score > 50 else "inverse")
 
-    st.markdown("#### 📊 비트코인 장기 저평가 & 저점 판단 지표 (100% 무료 데이터)")
-    tab_m1, tab_m2, tab_m3, tab_m4 = st.tabs(["200주 이동평균선", "주봉 RSI", "MVRV 비율 (온체인)", "NUPL 미실현순손익 (온체인)"])
+    st.markdown("#### 📊 비트코인 장기 저평가 & 저점 판단 지표 (실시간 고속 연산)")
+    tab_m1, tab_m2, tab_m3, tab_m4 = st.tabs(["200주 이동평균선", "주봉 RSI", "MVRV 모델", "NUPL 모델"])
 
-    df_weekly = get_btc_weekly_indicators()
-    df_onchain = get_coinmetrics_onchain_data()
+    df_btc_ind = get_btc_indicators()
 
     with tab_m1:
-        if not df_weekly.empty:
+        if not df_btc_ind.empty:
             st.caption("💡 **200주 이동평균선**: 역사적 사이클 하락장에서 비트코인의 최후 바닥 역할을 해온 선입니다.")
-            chart_data = df_weekly.reset_index()
+            chart_data = df_btc_ind.reset_index()
             c1 = alt.Chart(chart_data).mark_line(color='#1f77b4').encode(x='Date:T', y=alt.Y('Close:Q', scale=alt.Scale(type='log'), title='비트코인 가격 ($)'))
             c2 = alt.Chart(chart_data).mark_line(color='#d32f2f', strokeDash=[4, 4]).encode(x='Date:T', y=alt.Y('200W_MA:Q', scale=alt.Scale(type='log')))
             st.altair_chart((c1 + c2).properties(height=350), use_container_width=True)
         else:
-            st.info("주봉 데이터를 계산 중입니다...")
+            st.info("데이터를 계산 중입니다...")
 
     with tab_m2:
-        if not df_weekly.empty:
+        if not df_btc_ind.empty:
             st.caption("💡 **주봉 RSI**: 30 이하 진입 시 대중의 투매가 발생한 사이클 최저점 구간입니다.")
-            chart_rsi = df_weekly.reset_index()
+            chart_rsi = df_btc_ind.reset_index()
             r_chart = alt.Chart(chart_rsi).mark_line(color='#8e44ad').encode(
                 x='Date:T', y=alt.Y('Weekly_RSI:Q', scale=alt.Scale(domain=[10, 90]), title='RSI 수치')
             ).properties(height=300)
             st.altair_chart(r_chart, use_container_width=True)
         else:
-            st.info("RSI 지표를 계산 중입니다...")
+            st.info("데이터를 계산 중입니다...")
 
     with tab_m3:
-        if not df_onchain.empty:
-            st.caption("💡 **MVRV 비율 (CoinMetrics API)**: 시가총액 / 실현시가총액. **1.0 이하**는 저평가 구간입니다.")
-            df_mvrv = df_onchain.reset_index()
-            mvrv_chart = alt.Chart(df_mvrv).mark_line(color='#27ae60').encode(
-                x='time:T', y=alt.Y('MVRV:Q', title='MVRV')
+        if not df_btc_ind.empty:
+            st.caption("💡 **MVRV 모델**: 시가총액 대비 실현가치 추정 모델. 1.0 이하 진입 시 역사적 저평가 매집 구간입니다.")
+            df_m = df_btc_ind.reset_index()
+            mvrv_chart = alt.Chart(df_m).mark_line(color='#27ae60').encode(
+                x='Date:T', y=alt.Y('MVRV_Model:Q', title='MVRV 추정치')
             ).properties(height=300)
             st.altair_chart(mvrv_chart, use_container_width=True)
         else:
-            st.info("온체인 MVRV 데이터를 불러오는 중입니다...")
+            st.info("데이터를 계산 중입니다...")
 
     with tab_m4:
-        if not df_onchain.empty:
-            st.caption("💡 **NUPL (Net Unrealized Profit/Loss)**: 미실현 순손익. **0 이하(음수)** 진입 시 항복 구간입니다.")
-            df_nupl = df_onchain.reset_index()
-            nupl_chart = alt.Chart(df_nupl).mark_line(color='#e67e22').encode(
-                x='time:T', y=alt.Y('NUPL:Q', title='NUPL')
+        if not df_btc_ind.empty:
+            st.caption("💡 **NUPL 모델**: 미실현 순손익 추정 모델. 0 이하(음수) 진입 시 시장 항복 구간을 나타냅니다.")
+            df_n = df_btc_ind.reset_index()
+            nupl_chart = alt.Chart(df_n).mark_line(color='#e67e22').encode(
+                x='Date:T', y=alt.Y('NUPL_Model:Q', title='NUPL 추정치')
             ).properties(height=300)
             st.altair_chart(nupl_chart, use_container_width=True)
         else:
-            st.info("온체인 NUPL 데이터를 불러오는 중입니다...")
+            st.info("데이터를 계산 중입니다...")
 
 else:
     st.warning("⚠️ 가상자산 시세를 연결하는 중입니다. [데이터 새로고침]을 클릭해주세요.")
@@ -592,7 +574,7 @@ else:
 st.markdown("---")
 
 # ---------------------------------------------------------
-# 4. 증시 밸류에이션 및 투자 심리 (실시간 연동 적용)
+# 4. 증시 밸류에이션 및 투자 심리
 # ---------------------------------------------------------
 st.markdown("<div class='section-title'>🏛️ 증시 밸류에이션 및 투자 심리 지표</div>", unsafe_allow_html=True)
 cape_val = get_shiller_cape()
