@@ -42,14 +42,14 @@ api_key = st.sidebar.text_input("Gemini API Key", type="password", help="Google 
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 📌 수집 지표 및 출처")
 st.sidebar.caption("""
+• **가상자산 핵심 지표**: Upbit, Binance, Alternative.me
 • **미 3대 지수**: Yahoo Finance
 • **Shiller CAPE**: multpl.com
-• **공포·탐욕 지수**: CNN Business
-• **미 국채 금리 (2Y/5Y/10Y/30Y)**: St. Louis 연준 FRED
-• **신용 위험도**: FRED (High Yield Spread)
-• **거시 유동성**: WTI, Brent, VIX, DXY (Yahoo)
-• **M7, 코인 & 실적/PER**: Yahoo Finance & 업비트
-• **거시 경제 일정**: ForexFactory (High Impact 기준)
+• **증시 공포·탐욕 지수**: CNN Business
+• **미 국채 금리**: St. Louis 연준 FRED
+• **거시 유동성**: WTI, Brent, VIX, DXY, High Yield Spread
+• **M7 실적/PER**: Yahoo Finance
+• **거시 경제 일정**: ForexFactory
 """)
 
 st.title("🌐 글로벌 매크로 & 가상자산 대시보드")
@@ -61,6 +61,60 @@ if st.sidebar.button("🔄 데이터 새로고침", use_container_width=True):
 # ---------------------------------------------------------
 # Data Fetching Functions
 # ---------------------------------------------------------
+
+@st.cache_data(ttl=3600)
+def get_crypto_fear_and_greed():
+    """Alternative.me 크립토 공포 탐욕 지수 (무료 API)"""
+    try:
+        res = requests.get("https://api.alternative.me/fng/?limit=1", timeout=5).json()
+        data = res['data'][0]
+        score = int(data['value'])
+        rating_raw = data['value_classification']
+        
+        rating_map = {
+            'Extreme Fear': '극도의 공포 😱', 'Fear': '공포 😨',
+            'Neutral': '중립 😐', 'Greed': '탐욕 😋', 'Extreme Greed': '극도의 탐욕 🤑'
+        }
+        return score, rating_map.get(rating_raw, rating_raw)
+    except Exception:
+        return 50, "중립 😐"
+
+@st.cache_data(ttl=60)
+def get_crypto_extended_data():
+    """업비트, 바이낸스, 환율 데이터를 종합하여 김치 프리미엄 및 펀딩비 계산 (무료 API)"""
+    try:
+        # 1. 업비트 시세 (KRW)
+        upbit_url = "https://api.upbit.com/v1/ticker?markets=KRW-BTC,KRW-ETH"
+        upbit_res = requests.get(upbit_url, timeout=5).json()
+        upbit_btc = upbit_res[0]['trade_price']
+        upbit_btc_pct = upbit_res[0]['signed_change_rate'] * 100
+        upbit_eth = upbit_res[1]['trade_price']
+        upbit_eth_pct = upbit_res[1]['signed_change_rate'] * 100
+
+        # 2. 원/달러 환율 (Yahoo Finance)
+        usdkrw_ticker = yf.Ticker("KRW=X")
+        usdkrw = usdkrw_ticker.history(period="1d")['Close'].iloc[-1]
+
+        # 3. 바이낸스 BTC/USDT 무기한 선물 프리미엄 인덱스 & 펀딩비 (무료 엔드포인트)
+        binance_url = "https://fapi.binance.com/fapi/v1/premiumIndex?symbol=BTCUSDT"
+        binance_res = requests.get(binance_url, timeout=5).json()
+        binance_btc = float(binance_res['markPrice'])
+        funding_rate = float(binance_res['lastFundingRate']) * 100  # % 단위 변환
+
+        # 4. 김치 프리미엄 계산
+        kimchi_premium = ((upbit_btc / (binance_btc * usdkrw)) - 1) * 100
+
+        return {
+            "btc_krw": upbit_btc, "btc_pct": upbit_btc_pct,
+            "eth_krw": upbit_eth, "eth_pct": upbit_eth_pct,
+            "kimchi_premium": kimchi_premium,
+            "funding_rate": funding_rate,
+            "binance_btc_usd": binance_btc,
+            "usdkrw": usdkrw
+        }
+    except Exception:
+        return None
+
 @st.cache_data(ttl=300)
 def get_us_indices():
     indices = {
@@ -189,21 +243,8 @@ def get_macro_data():
             data[name] = {"price": 0.0, "change": 0.0, "pct": 0.0, "link": link}
     return data
 
-@st.cache_data(ttl=60)
-def get_crypto_data():
-    try:
-        url = "https://api.upbit.com/v1/ticker?markets=KRW-BTC,KRW-ETH"
-        res = requests.get(url, timeout=5).json()
-        return {
-            "BTC": {"price": res[0]['trade_price'], "pct": res[0]['signed_change_rate'] * 100, "link": "https://upbit.com/exchange?code=CASA.KRW-BTC"},
-            "ETH": {"price": res[1]['trade_price'], "pct": res[1]['signed_change_rate'] * 100, "link": "https://upbit.com/exchange?code=CASA.KRW-ETH"}
-        }
-    except Exception:
-        return {"BTC": {"price": 0, "pct": 0, "link": ""}, "ETH": {"price": 0, "pct": 0, "link": ""}}
-
 @st.cache_data(ttl=300)
 def get_m7_drawdown():
-    """M7 기업 현재가, 52주 최고가, 고점 대비 하락률 및 PER (TTM, FWD) 수집"""
     m7_tickers = {
         'NVIDIA': 'NVDA', 'Apple': 'AAPL', 'Microsoft': 'MSFT',
         'Alphabet': 'GOOGL', 'Amazon': 'AMZN', 'Meta': 'META', 'Tesla': 'TSLA'
@@ -222,7 +263,6 @@ def get_m7_drawdown():
                 high_52w = hist['High'].max()
                 drawdown = ((curr_price - high_52w) / high_52w) * 100
                 
-                # PER 데이터 추출 (없을 경우 None 반환)
                 pe_ttm = info.get('trailingPE', None)
                 pe_fwd = info.get('forwardPE', None)
                 
@@ -241,20 +281,16 @@ def get_m7_drawdown():
 
 @st.cache_data(ttl=3600)
 def get_upcoming_market_events():
-    """현재시점 기준 보름(15일) 이내 주요 기술주 실적발표 및 거시경제 일정(API 연동) 탐색"""
     today = datetime.now().date()
     end_date = today + timedelta(days=15)
     events = []
     
-    # 1. 주요 M7 기업 실적 발표 예정일 (Yahoo Finance)
     m7_symbols = {'NVIDIA': 'NVDA', 'Apple': 'AAPL', 'Microsoft': 'MSFT', 'Alphabet': 'GOOGL', 'Amazon': 'AMZN', 'Meta': 'META', 'Tesla': 'TSLA'}
     for name, symbol in m7_symbols.items():
         try:
             t = yf.Ticker(symbol)
             cal = t.calendar
             earnings_dates = []
-            
-            # yfinance 최신버전 호환성 고려
             if isinstance(cal, dict) and 'Earnings Date' in cal:
                 earnings_dates = cal['Earnings Date']
             elif isinstance(cal, pd.DataFrame) and 'Earnings Date' in cal.index:
@@ -271,10 +307,8 @@ def get_upcoming_market_events():
         except Exception:
             pass
 
-    # 2. 실시간 거시경제 이벤트 (ForexFactory JSON API 연동) - High Impact(고위험) USD 지표만 필터링
     try:
         headers = {'User-Agent': 'Mozilla/5.0'}
-        # 이번주, 다음주 데이터를 가져옴
         urls = [
             "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
             "https://nfs.faireconomy.media/ff_calendar_nextweek.json"
@@ -287,7 +321,6 @@ def get_upcoming_market_events():
                     if item.get('country') == 'USD' and item.get('impact') == 'High':
                         event_date_str = item.get('date')
                         if event_date_str:
-                            # 한국 시간(KST)으로 변환
                             event_time_utc = pd.to_datetime(event_date_str, utc=True)
                             event_time_kst = event_time_utc.tz_convert('Asia/Seoul')
                             event_date = event_time_kst.date()
@@ -300,7 +333,7 @@ def get_upcoming_market_events():
                                     "이벤트": f"{item.get('title')} ({time_str} KST)",
                                     "출처": "ForexFactory"
                                 })
-    except Exception as e:
+    except Exception:
         pass
 
     df_events = pd.DataFrame(events)
@@ -324,8 +357,44 @@ def render_custom_line_chart(df, value_col='Close', min_y=None, line_color='#1f7
     ).properties(height=120)
     st.altair_chart(chart, use_container_width=True)
 
+
+# =========================================================
+# UI 렌더링 시작
+# =========================================================
+
 # ---------------------------------------------------------
-# 1. 🇺🇸 미 3대 주요 지수 섹션
+# 1. 🪙 가상자산 핵심 지표 (최상단 이동 및 지표 추가)
+# ---------------------------------------------------------
+st.markdown("<div class='section-title'>🪙 가상자산 핵심 지표 및 투자 심리</div>", unsafe_allow_html=True)
+crypto_data = get_crypto_extended_data()
+crypto_fng_score, crypto_fng_rating = get_crypto_fear_and_greed()
+
+if crypto_data:
+    cc1, cc2, cc3, cc4, cc5 = st.columns(5)
+    with cc1:
+        st.metric("비트코인 (Upbit)", f"₩{crypto_data['btc_krw']:,}", f"{crypto_data['btc_pct']:+.2f}%")
+        st.markdown("[🔗 업비트 BTC](https://upbit.com/exchange?code=CASA.KRW-BTC)", unsafe_allow_html=True)
+    with cc2:
+        st.metric("이더리움 (Upbit)", f"₩{crypto_data['eth_krw']:,}", f"{crypto_data['eth_pct']:+.2f}%")
+        st.markdown("[🔗 업비트 ETH](https://upbit.com/exchange?code=CASA.KRW-ETH)", unsafe_allow_html=True)
+    with cc3:
+        # 김치 프리미엄: 한국 시장 과열 판단 지표
+        kp = crypto_data['kimchi_premium']
+        st.metric("한국 프리미엄 (김프)", f"{kp:.2f}%", help="업비트 가격과 바이낸스 가격(환율 적용)의 차이입니다. 높을수록 한국 시장의 매수세가 강함을 의미합니다.", delta_color="inverse" if kp > 5 else "normal")
+    with cc4:
+        # 바이낸스 펀딩비: 선물 시장 롱/숏 비율 과열 판단 지표
+        fr = crypto_data['funding_rate']
+        st.metric("바이낸스 BTC 펀딩비", f"{fr:.4f}%", help="무기한 선물 펀딩비입니다. 양수면 롱(매수) 우위, 음수면 숏(매도) 우위를 나타냅니다.", delta_color="off")
+    with cc5:
+        # 크립토 공포 탐욕 지수
+        st.metric("크립토 공포·탐욕", f"{crypto_fng_score} / 100", crypto_fng_rating, delta_color="normal" if crypto_fng_score > 50 else "inverse")
+else:
+    st.error("가상자산 데이터를 불러오는 데 실패했습니다.")
+
+st.markdown("---")
+
+# ---------------------------------------------------------
+# 2. 🇺🇸 미 3대 주요 지수 섹션
 # ---------------------------------------------------------
 st.markdown("<div class='section-title'>🇺🇸 미국 3대 주요 증시 지수</div>", unsafe_allow_html=True)
 us_indices = get_us_indices()
@@ -340,7 +409,7 @@ for col, (name, info) in zip(idx_cols, us_indices.items()):
 st.markdown("---")
 
 # ---------------------------------------------------------
-# 2. 📅 향후 2주간(보름) 증시 주요일정 & 실적 발표
+# 3. 📅 향후 2주간(보름) 증시 주요일정 & 실적 발표
 # ---------------------------------------------------------
 st.markdown("<div class='section-title'>📅 향후 2주간(보름) 주요 일정 & 실적 발표</div>", unsafe_allow_html=True)
 events_df = get_upcoming_market_events()
@@ -357,15 +426,14 @@ if not events_df.empty:
             "출처": st.column_config.TextColumn("🔍 정보 출처", width="small")
         }
     )
-    # 유저가 직접 더블체크할 수 있는 원본 출처 각주 표시
-    st.caption("💡 **직접 더블체크하기:** [Yahoo Finance 실적캘린더](https://finance.yahoo.com/calendar/earnings) | [ForexFactory 경제 캘린더](https://www.forexfactory.com/calendar) | [Investing.com 경제 캘린더](https://kr.investing.com/economic-calendar/)")
+    st.caption("💡 **직접 더블체크하기:** [Yahoo Finance 실적캘린더](https://finance.yahoo.com/calendar/earnings) | [ForexFactory 경제 캘린더](https://www.forexfactory.com/calendar)")
 else:
     st.info("향후 15일 이내에 예정된 주요 이벤트가 없습니다.")
 
 st.markdown("---")
 
 # ---------------------------------------------------------
-# 3. 증시 밸류에이션 및 투자 심리
+# 4. 증시 밸류에이션 및 투자 심리
 # ---------------------------------------------------------
 st.markdown("<div class='section-title'>🏛️ 증시 밸류에이션 및 투자 심리 지표</div>", unsafe_allow_html=True)
 cape_val = get_shiller_cape()
@@ -383,7 +451,7 @@ with k3:
 st.markdown("---")
 
 # ---------------------------------------------------------
-# 4. 미 국채 만기별 금리 섹션
+# 5. 미 국채 만기별 금리 섹션
 # ---------------------------------------------------------
 st.markdown("<div class='section-title'>🇺🇸 미 국채 만기별 금리 현황 (최근 1개월 추이, Y축 최저 3.0% 고정)</div>", unsafe_allow_html=True)
 treasury_data = get_fred_treasury_data()
@@ -397,7 +465,7 @@ for col, name in zip(t_cols, ['미 국채 2년물', '미 국채 5년물', '미 �
 st.markdown("---")
 
 # ---------------------------------------------------------
-# 5. 유동성 & 신용 위험 지표 섹션
+# 6. 유동성 & 신용 위험 지표 섹션
 # ---------------------------------------------------------
 st.markdown("<div class='section-title'>💧 유동성 및 신용 위험 지표</div>", unsafe_allow_html=True)
 hy_info = get_hy_spread()
@@ -415,20 +483,8 @@ for col, key, label, fmt in zip([m2, m3, m4, m5], ['달러 인덱스', 'VIX 지�
 st.markdown("---")
 
 # ---------------------------------------------------------
-# 6. 가상자산 시세 & M7 Drawdown & PER 현황
+# 7. M7 Drawdown & PER 현황
 # ---------------------------------------------------------
-st.markdown("<div class='section-title'>🪙 가상자산 주요 시세</div>", unsafe_allow_html=True)
-crypto_data = get_crypto_data()
-cc1, cc2 = st.columns(2)
-with cc1:
-    btc = crypto_data.get("BTC", {})
-    st.metric("비트코인 (BTC/KRW)", f"₩{btc['price']:,}", f"{btc['pct']:+.2f}%")
-    st.markdown(f"[🔗 업비트 BTC 차트]({btc['link']})", unsafe_allow_html=True)
-with cc2:
-    eth = crypto_data.get("ETH", {})
-    st.metric("이더리움 (ETH/KRW)", f"₩{eth['price']:,}", f"{eth['pct']:+.2f}%")
-    st.markdown(f"[🔗 업비트 ETH 차트]({eth['link']})", unsafe_allow_html=True)
-
 st.markdown("<div class='section-title'>📈 M7 기업 주가, 하락률(Drawdown) 및 PER 현황</div>", unsafe_allow_html=True)
 m7_df = get_m7_drawdown()
 
@@ -447,7 +503,7 @@ if not m7_df.empty:
                        "고점 대비 하락률 (Drawdown)": "{:.2f}%",
                        "PER (TTM)": "{:.2f}",
                        "PER (FWD)": "{:.2f}"
-                   }, na_rep="N/A"), # PER 데이터가 없을 경우 N/A 표시
+                   }, na_rep="N/A"),
         use_container_width=True,
         height=280
     )
@@ -457,7 +513,7 @@ else:
 st.markdown("---")
 
 # ---------------------------------------------------------
-# 7. Gemini AI 매크로 & 유동성 종합 진단
+# 8. Gemini AI 매크로 & 유동성 종합 진단
 # ---------------------------------------------------------
 st.markdown("<div class='section-title'>🤖 Gemini AI 매크로 & 유동성 시황 분석</div>", unsafe_allow_html=True)
 
@@ -478,6 +534,10 @@ else:
                 hy_val = hy_info.get('price', 'N/A')
                 dxy_val = macro_info.get('달러 인덱스', {}).get('price', 'N/A')
                 
+                # 가상자산 데이터 확인
+                btc_price = crypto_data['btc_krw'] if crypto_data else "N/A"
+                crypto_fng = crypto_fng_score if crypto_fng_score else "N/A"
+                
                 prompt = f"""
                 너는 최고 수준의 글로벌 매크로 및 신용분석 수석 전략가야.
                 현재 대시보드의 실시간 수치는 다음과 같아:
@@ -488,14 +548,14 @@ else:
                 - 하이일드 옵션조정스프레드(OAS): {hy_val}%p
                 - 달러 인덱스(DXY): {dxy_val} | VIX: {macro_info.get('VIX 지수', {}).get('price', 'N/A')}
                 - 원유: WTI(${macro_info.get('WTI 유가', {}).get('price', 'N/A')}), Brent(${macro_info.get('브렌트유', {}).get('price', 'N/A')})
-                - 비트코인: ₩{crypto_data.get('BTC', {}).get('price', 0):,}
+                - 비트코인: ₩{btc_price:,} | 크립토 공포/탐욕 지수: {crypto_fng}점
                 
                 위 데이터를 바탕으로 전문적인 [글로벌 매크로 & 자산배분 전략 보고서]를 작성해 줘.
                 
                 [보고서 작성 필수 항목]
-                1. **미 주요 증시 흐름 및 심리 평가**: S&P500/나스닥/다우 흐름과 공포·탐욕 지수({fg_score}점) 진단
+                1. **미 주요 증시 흐름 및 심리 평가**: S&P500/나스닥/다우 흐름과 공포·탐욕 지수 진단
                 2. **수익률 곡선(Yield Curve) 및 금리 동향**: FRED 2Y/5Y/10Y/30Y 금리 수준 분석
-                3. **신용 위험 및 유동성 진단**: 하이일드 스프레드({hy_val}%p) 및 달러/유가 동향이 위험자산에 미치는 영향
+                3. **신용 위험 및 유동성 진단**: 하이일드 스프레드 및 달러/유가 동향이 위험자산에 미치는 영향
                 4. **향후 2주 대응 및 투자 포지셔닝 조언**: 종합 리스크 수준과 자산배분 전략
                 
                 마크다운으로 읽기 편하게 작성해 줘.
