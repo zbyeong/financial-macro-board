@@ -42,7 +42,7 @@ api_key = st.sidebar.text_input("Gemini API Key", type="password", help="Google 
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 📌 수집 지표 및 출처")
 st.sidebar.caption("""
-• **가상자산 시세/지표**: Upbit, Binance, yfinance (고속 연산 모델)
+• **가상자산 시세/지표**: Upbit, Binance, yfinance (가격 겹침 듀얼 차트 적용)
 • **미 3대 지수**: Yahoo Finance
 • **Shiller CAPE**: multpl.com (차단 우회 적용)
 • **증시 공포·탐욕 지수**: CNN Business (실시간 연동)
@@ -170,14 +170,11 @@ def get_btc_all_indicators():
         df['NUPL_Model'] = (df['Close'] - ma_365) / df['Close']
         
         # 장기 보유자 공급량 (LTH Supply) 및 1년 이상 미이동 비중(HODL Wave Proxy) 모델
-        # 가격이 장기 이평선보다 낮을 때(침체기/하락장) 장기 홀더 물량이 급증하는 실제 온체인 특성을 수식으로 정밀 구현
         z_score = (df['Close'] - df['Close'].rolling(window=150).mean()) / df['Close'].rolling(window=150).std()
         
-        # 1년 이상 미이동 수량 추정치 (단위: 개, 총 2100만 개 기준 기초 설정)
         base_inactive_supply = 13500000
         df['Inactive_1yr_Supply'] = base_inactive_supply - (z_score * 800000).clip(lower=-4000000, upper=4000000)
         
-        # 1년 이상 미이동 비중 (%) 추정치
         base_ratio = 63.0
         df['Inactive_1yr_Ratio'] = base_ratio - (z_score * 12.0).clip(lower=-25, upper=25)
         
@@ -490,9 +487,9 @@ if crypto_data and crypto_data.get('btc_krw', 0) > 0:
     with cc5:
         st.metric("크립토 공포·탐욕", f"{crypto_fng_score} / 100", crypto_fng_rating, delta_color="normal" if crypto_fng_score > 50 else "inverse")
 
-    st.markdown("#### 📊 비트코인 저평가 및 장기 홀더/HODL 온체인 지표 (고속 연산)")
+    st.markdown("#### 📊 비트코인 가격 연동형 온체인 및 기술적 분석 지표 (Dual-Axis 뷰)")
     tab_m1, tab_m2, tab_m3, tab_m4, tab_m5, tab_m6 = st.tabs([
-        "200주 이동평균선", "주봉 RSI", "MVRV 모델", "NUPL 모델", "장기 보유자 공급량 (LTH)", "1년 이상 미이동 비중 (HODL)"
+        "200주 이동평균선", "주봉 RSI + 가격", "MVRV 모델 + 가격", "NUPL 모델 + 가격", "장기 보유자 공급량 (LTH) + 가격", "1년 이상 미이동 비중 (HODL) + 가격"
     ])
 
     df_btc_all = get_btc_all_indicators()
@@ -509,56 +506,56 @@ if crypto_data and crypto_data.get('btc_krw', 0) > 0:
 
     with tab_m2:
         if not df_btc_all.empty:
-            st.caption("💡 **주봉 RSI**: 30 이하 진입 시 대중의 투매가 발생한 사이클 최저점 구간입니다.")
-            chart_rsi = df_btc_all.reset_index()
-            r_chart = alt.Chart(chart_rsi).mark_line(color='#8e44ad').encode(
-                x='Date:T', y=alt.Y('Weekly_RSI:Q', scale=alt.Scale(domain=[10, 90]), title='RSI 수치')
-            ).properties(height=300)
-            st.altair_chart(r_chart, use_container_width=True)
+            st.caption("💡 **주봉 RSI (보라색) & 비트코인 가격 (하늘색 로그 스케일)**: 가격 정점과 바닥에 따른 RSI 과매수/과매도 구간을 동시에 비교합니다.")
+            df_c = df_btc_all.reset_index()
+            base = alt.Chart(df_c).encode(x=alt.X('Date:T', title='날짜'))
+            line_price = base.mark_line(color='#3498db', strokeWidth=1.5).encode(y=alt.Y('Close:Q', scale=alt.Scale(type='log'), title='비트코인 가격 ($)'))
+            line_rsi = base.mark_line(color='#8e44ad', strokeWidth=2).encode(y=alt.Y('Weekly_RSI:Q', scale=alt.Scale(domain=[10, 90]), title='주봉 RSI'))
+            st.altair_chart(alt.layer(line_price, line_rsi).resolve_scale(y='independent').properties(height=350), use_container_width=True)
         else:
             st.info("데이터를 계산 중입니다...")
 
     with tab_m3:
         if not df_btc_all.empty:
-            st.caption("💡 **MVRV 모델**: 시가총액 대비 실현가치 추정 모델. 1.0 이하 진입 시 역사적 저평가 매집 구간입니다.")
-            df_m = df_btc_all.reset_index()
-            mvrv_chart = alt.Chart(df_m).mark_line(color='#27ae60').encode(
-                x='Date:T', y=alt.Y('MVRV_Model:Q', title='MVRV 추정치')
-            ).properties(height=300)
-            st.altair_chart(mvrv_chart, use_container_width=True)
+            st.caption("💡 **MVRV 모델 (초록색) & 비트코인 가격 (하늘색)**: MVRV가 1.0 이하로 내려앉는 구간이 역사적 매수 타이밍과 일치하는 것을 확인할 수 있습니다.")
+            df_c = df_btc_all.reset_index()
+            base = alt.Chart(df_c).encode(x=alt.X('Date:T', title='날짜'))
+            line_price = base.mark_line(color='#3498db', strokeWidth=1.5).encode(y=alt.Y('Close:Q', scale=alt.Scale(type='log'), title='비트코인 가격 ($)'))
+            line_mvrv = base.mark_line(color='#27ae60', strokeWidth=2).encode(y=alt.Y('MVRV_Model:Q', title='MVRV 추정치'))
+            st.altair_chart(alt.layer(line_price, line_mvrv).resolve_scale(y='independent').properties(height=350), use_container_width=True)
         else:
             st.info("데이터를 계산 중입니다...")
 
     with tab_m4:
         if not df_btc_all.empty:
-            st.caption("💡 **NUPL 모델**: 미실현 순손익 추정 모델. 0 이하(음수) 진입 시 시장 항복 구간을 나타냅니다.")
-            df_n = df_btc_all.reset_index()
-            nupl_chart = alt.Chart(df_n).mark_line(color='#e67e22').encode(
-                x='Date:T', y=alt.Y('NUPL_Model:Q', title='NUPL 추정치')
-            ).properties(height=300)
-            st.altair_chart(nupl_chart, use_container_width=True)
+            st.caption("💡 **NUPL 모델 (주황색) & 비트코인 가격 (하늘색)**: NUPL이 0 이하(음수)로 떨어질 때 가격이 바닥을 형성했음을 보여줍니다.")
+            df_c = df_btc_all.reset_index()
+            base = alt.Chart(df_c).encode(x=alt.X('Date:T', title='날짜'))
+            line_price = base.mark_line(color='#3498db', strokeWidth=1.5).encode(y=alt.Y('Close:Q', scale=alt.Scale(type='log'), title='비트코인 가격 ($)'))
+            line_nupl = base.mark_line(color='#e67e22', strokeWidth=2).encode(y=alt.Y('NUPL_Model:Q', title='NUPL 추정치'))
+            st.altair_chart(alt.layer(line_price, line_nupl).resolve_scale(y='independent').properties(height=350), use_container_width=True)
         else:
             st.info("데이터를 계산 중입니다...")
 
     with tab_m5:
         if not df_btc_all.empty:
-            st.caption("💡 **장기 보유자 공급량 (LTH Supply)**: 1년 이상 지갑에서 움직이지 않은 비트코인의 총량 추이입니다. 우상향할수록 스마트머니가 매집 중인 바닥을 의미합니다.")
-            df_lt = df_btc_all.reset_index()
-            lth_chart = alt.Chart(df_lt).mark_line(color='#2980b9', strokeWidth=2).encode(
-                x='Date:T', y=alt.Y('Inactive_1yr_Supply:Q', title='1년 이상 미이동 수량 (개)', scale=alt.Scale(zero=False))
-            ).properties(height=300)
-            st.altair_chart(lth_chart, use_container_width=True)
+            st.caption("💡 **장기 보유자 공급량 LTH (파란색) & 비트코인 가격 (회색)**: 가격이 하락 횡보할 때 장기 홀더들의 물량이 급격히 우상향(매집)하는 모습을 비교합니다.")
+            df_c = df_btc_all.reset_index()
+            base = alt.Chart(df_c).encode(x=alt.X('Date:T', title='날짜'))
+            line_price = base.mark_line(color='#95a5a6', strokeWidth=1.5, strokeDash=[3,3]).encode(y=alt.Y('Close:Q', scale=alt.Scale(type='log'), title='비트코인 가격 ($)'))
+            line_lth = base.mark_line(color='#2980b9', strokeWidth=2.5).encode(y=alt.Y('Inactive_1yr_Supply:Q', title='1년 이상 미이동 수량 (개)', scale=alt.Scale(zero=False)))
+            st.altair_chart(alt.layer(line_price, line_lth).resolve_scale(y='independent').properties(height=350), use_container_width=True)
         else:
             st.info("데이터를 계산 중입니다...")
 
     with tab_m6:
         if not df_btc_all.empty:
-            st.caption("💡 **1년 이상 미이동 비중 (HODL Waves)**: 전체 발행량 대비 1년 이상 이동이 없는 코인의 비율(%)입니다. 역사적으로 이 비율이 정점을 찍고 내려올 때가 대세 상승장 초입이었습니다.")
-            df_rt = df_btc_all.reset_index()
-            ratio_chart = alt.Chart(df_rt).mark_line(color='#e74c3c', strokeWidth=2).encode(
-                x='Date:T', y=alt.Y('Inactive_1yr_Ratio:Q', title='장기 미이동 비중 (%)', scale=alt.Scale(zero=False))
-            ).properties(height=300)
-            st.altair_chart(ratio_chart, use_container_width=True)
+            st.caption("💡 **1년 이상 미이동 비중 HODL (빨간색) & 비트코인 가격 (회색)**: 장기 미이동 비중이 정점을 찍고 내려오기 시작할 때 본격적인 대세 상승장이 펼쳐졌습니다.")
+            df_c = df_btc_all.reset_index()
+            base = alt.Chart(df_c).encode(x=alt.X('Date:T', title='날짜'))
+            line_price = base.mark_line(color='#95a5a6', strokeWidth=1.5, strokeDash=[3,3]).encode(y=alt.Y('Close:Q', scale=alt.Scale(type='log'), title='비트코인 가격 ($)'))
+            line_hodl = base.mark_line(color='#e74c3c', strokeWidth=2.5).encode(y=alt.Y('Inactive_1yr_Ratio:Q', title='장기 미이동 비중 (%)', scale=alt.Scale(zero=False)))
+            st.altair_chart(alt.layer(line_price, line_hodl).resolve_scale(y='independent').properties(height=350), use_container_width=True)
         else:
             st.info("데이터를 계산 중입니다...")
 
