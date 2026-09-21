@@ -42,7 +42,7 @@ api_key = st.sidebar.text_input("Gemini API Key", type="password", help="Google 
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 📌 수집 지표 및 출처")
 st.sidebar.caption("""
-• **가상자산 핵심 지표**: Upbit, Binance, Alternative.me
+• **가상자산 시세/온체인**: Upbit, Binance, CoinMetrics (Open API)
 • **미 3대 지수**: Yahoo Finance
 • **Shiller CAPE**: multpl.com
 • **증시 공포·탐욕 지수**: CNN Business
@@ -62,7 +62,7 @@ if st.sidebar.button("🔄 데이터 새로고침", use_container_width=True):
 # Data Fetching Functions
 # ---------------------------------------------------------
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=1800)
 def get_crypto_fear_and_greed():
     """Alternative.me 크립토 공포 탐욕 지수 (무료 API)"""
     try:
@@ -81,39 +81,120 @@ def get_crypto_fear_and_greed():
 
 @st.cache_data(ttl=60)
 def get_crypto_extended_data():
-    """업비트, 바이낸스, 환율 데이터를 종합하여 김치 프리미엄 및 펀딩비 계산 (무료 API)"""
+    """업비트, 환율, 바이낸스 시세 수집"""
+    result = {
+        "btc_krw": 0, "btc_pct": 0.0,
+        "eth_krw": 0, "eth_pct": 0.0,
+        "kimchi_premium": None,
+        "funding_rate": None,
+        "binance_btc_usd": None,
+        "usdkrw": 1380.0
+    }
+
     try:
-        # 1. 업비트 시세 (KRW)
         upbit_url = "https://api.upbit.com/v1/ticker?markets=KRW-BTC,KRW-ETH"
         upbit_res = requests.get(upbit_url, timeout=5).json()
-        upbit_btc = upbit_res[0]['trade_price']
-        upbit_btc_pct = upbit_res[0]['signed_change_rate'] * 100
-        upbit_eth = upbit_res[1]['trade_price']
-        upbit_eth_pct = upbit_res[1]['signed_change_rate'] * 100
-
-        # 2. 원/달러 환율 (Yahoo Finance)
-        usdkrw_ticker = yf.Ticker("KRW=X")
-        usdkrw = usdkrw_ticker.history(period="1d")['Close'].iloc[-1]
-
-        # 3. 바이낸스 BTC/USDT 무기한 선물 프리미엄 인덱스 & 펀딩비 (무료 엔드포인트)
-        binance_url = "https://fapi.binance.com/fapi/v1/premiumIndex?symbol=BTCUSDT"
-        binance_res = requests.get(binance_url, timeout=5).json()
-        binance_btc = float(binance_res['markPrice'])
-        funding_rate = float(binance_res['lastFundingRate']) * 100  # % 단위 변환
-
-        # 4. 김치 프리미엄 계산
-        kimchi_premium = ((upbit_btc / (binance_btc * usdkrw)) - 1) * 100
-
-        return {
-            "btc_krw": upbit_btc, "btc_pct": upbit_btc_pct,
-            "eth_krw": upbit_eth, "eth_pct": upbit_eth_pct,
-            "kimchi_premium": kimchi_premium,
-            "funding_rate": funding_rate,
-            "binance_btc_usd": binance_btc,
-            "usdkrw": usdkrw
-        }
+        result["btc_krw"] = upbit_res[0]['trade_price']
+        result["btc_pct"] = upbit_res[0]['signed_change_rate'] * 100
+        result["eth_krw"] = upbit_res[1]['trade_price']
+        result["eth_pct"] = upbit_res[1]['signed_change_rate'] * 100
     except Exception:
-        return None
+        pass
+
+    try:
+        forex_url = "https://quotation-api-cdn.dunamu.com/v1/forex/recent?codes=FRX.KRWUSD"
+        forex_res = requests.get(forex_url, timeout=5).json()
+        result["usdkrw"] = float(forex_res[0]['basePrice'])
+    except Exception:
+        try:
+            usdkrw_ticker = yf.Ticker("KRW=X")
+            hist = usdkrw_ticker.history(period="5d")
+            if not hist.empty:
+                result["usdkrw"] = float(hist['Close'].iloc[-1])
+        except Exception:
+            pass
+
+    btc_usd = None
+    try:
+        binance_url = "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"
+        binance_res = requests.get(binance_url, timeout=5).json()
+        btc_usd = float(binance_res['price'])
+    except Exception:
+        try:
+            btc_yf = yf.Ticker("BTC-USD").history(period="2d")
+            if not btc_yf.empty:
+                btc_usd = float(btc_yf['Close'].iloc[-1])
+        except Exception:
+            pass
+
+    result["binance_btc_usd"] = btc_usd
+
+    try:
+        funding_url = "https://fapi.binance.com/fapi/v1/premiumIndex?symbol=BTCUSDT"
+        funding_res = requests.get(funding_url, timeout=5).json()
+        result["funding_rate"] = float(funding_res['lastFundingRate']) * 100
+    except Exception:
+        result["funding_rate"] = None
+
+    if result["btc_krw"] > 0 and btc_usd and result["usdkrw"] > 0:
+        global_btc_krw = btc_usd * result["usdkrw"]
+        result["kimchi_premium"] = ((result["btc_krw"] / global_btc_krw) - 1) * 100
+
+    return result
+
+@st.cache_data(ttl=86400)
+def get_btc_weekly_indicators():
+    """yfinance 기반 비트코인 주봉 200주 이평선 및 주봉 RSI 100% 무료 계산"""
+    try:
+        btc = yf.Ticker("BTC-USD")
+        df = btc.history(period="max", interval="1wk")
+        if df.empty or len(df) < 50:
+            df = btc.history(period="max", interval="1d")
+            df = df['Close'].resample('W').last().to_frame()
+        else:
+            df = df[['Close']]
+            
+        df = df.dropna()
+        # 200주 이동평균선
+        df['200W_MA'] = df['Close'].rolling(window=200).mean()
+        
+        # 주봉 RSI (14주)
+        delta = df['Close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        df['Weekly_RSI'] = 100 - (100 / (1 + rs))
+        
+        return df.dropna(subset=['Weekly_RSI'])
+    except Exception:
+        return pd.DataFrame()
+
+@st.cache_data(ttl=86400)
+def get_coinmetrics_onchain_data():
+    """CoinMetrics 커뮤니티 Open API (인증키X, 100% 무료) 기반 MVRV & NUPL 산출"""
+    try:
+        url = "https://community-api.coinmetrics.io/v4/timeseries/asset-metrics?assets=btc&metrics=CapMrktCurUSD,CapRealUSD&frequency=1d&page_size=5000"
+        res = requests.get(url, timeout=10).json()
+        data = res.get('data', [])
+        if not data:
+            return pd.DataFrame()
+        
+        df = pd.DataFrame(data)
+        df['time'] = pd.to_datetime(df['time'])
+        df = df.set_index('time')
+        df['CapMrktCurUSD'] = pd.to_numeric(df['CapMrktCurUSD'], errors='coerce')
+        df['CapRealUSD'] = pd.to_numeric(df['CapRealUSD'], errors='coerce')
+        df = df.dropna()
+        
+        # MVRV = 시가총액 / 실현시가총액
+        df['MVRV'] = df['CapMrktCurUSD'] / df['CapRealUSD']
+        
+        # NUPL = (시가총액 - 실현시가총액) / 시가총액
+        df['NUPL'] = (df['CapMrktCurUSD'] - df['CapRealUSD']) / df['CapMrktCurUSD']
+        
+        return df
+    except Exception:
+        return pd.DataFrame()
 
 @st.cache_data(ttl=300)
 def get_us_indices():
@@ -359,17 +440,17 @@ def render_custom_line_chart(df, value_col='Close', min_y=None, line_color='#1f7
 
 
 # =========================================================
-# UI 렌더링 시작
+# UI 렌더링
 # =========================================================
 
 # ---------------------------------------------------------
-# 1. 🪙 가상자산 핵심 지표 (최상단 이동 및 지표 추가)
+# 1. 🪙 가상자산 핵심 지표 및 온체인/가격 저평가 분석
 # ---------------------------------------------------------
-st.markdown("<div class='section-title'>🪙 가상자산 핵심 지표 및 투자 심리</div>", unsafe_allow_html=True)
+st.markdown("<div class='section-title'>🪙 가상자산 핵심 지표 및 저점/저평가 진단</div>", unsafe_allow_html=True)
 crypto_data = get_crypto_extended_data()
 crypto_fng_score, crypto_fng_rating = get_crypto_fear_and_greed()
 
-if crypto_data:
+if crypto_data and crypto_data.get('btc_krw', 0) > 0:
     cc1, cc2, cc3, cc4, cc5 = st.columns(5)
     with cc1:
         st.metric("비트코인 (Upbit)", f"₩{crypto_data['btc_krw']:,}", f"{crypto_data['btc_pct']:+.2f}%")
@@ -378,18 +459,72 @@ if crypto_data:
         st.metric("이더리움 (Upbit)", f"₩{crypto_data['eth_krw']:,}", f"{crypto_data['eth_pct']:+.2f}%")
         st.markdown("[🔗 업비트 ETH](https://upbit.com/exchange?code=CASA.KRW-ETH)", unsafe_allow_html=True)
     with cc3:
-        # 김치 프리미엄: 한국 시장 과열 판단 지표
-        kp = crypto_data['kimchi_premium']
-        st.metric("한국 프리미엄 (김프)", f"{kp:.2f}%", help="업비트 가격과 바이낸스 가격(환율 적용)의 차이입니다. 높을수록 한국 시장의 매수세가 강함을 의미합니다.", delta_color="inverse" if kp > 5 else "normal")
+        kp = crypto_data.get('kimchi_premium')
+        if kp is not None:
+            st.metric("한국 프리미엄 (김프)", f"{kp:.2f}%", help="업비트 가격과 해외 가격(환율 적용)의 차이입니다.", delta_color="inverse" if kp > 5 else "normal")
+        else:
+            st.metric("한국 프리미엄 (김프)", "N/A")
     with cc4:
-        # 바이낸스 펀딩비: 선물 시장 롱/숏 비율 과열 판단 지표
-        fr = crypto_data['funding_rate']
-        st.metric("바이낸스 BTC 펀딩비", f"{fr:.4f}%", help="무기한 선물 펀딩비입니다. 양수면 롱(매수) 우위, 음수면 숏(매도) 우위를 나타냅니다.", delta_color="off")
+        fr = crypto_data.get('funding_rate')
+        if fr is not None:
+            st.metric("바이낸스 BTC 펀딩비", f"{fr:.4f}%", help="무기한 선물 펀딩비입니다.", delta_color="off")
+        else:
+            st.metric("바이낸스 BTC 펀딩비", "N/A")
     with cc5:
-        # 크립토 공포 탐욕 지수
         st.metric("크립토 공포·탐욕", f"{crypto_fng_score} / 100", crypto_fng_rating, delta_color="normal" if crypto_fng_score > 50 else "inverse")
+
+    # 4대 저평가/저점 지표 시각화 (100% 무료 연동)
+    st.markdown("#### 📊 비트코인 장기 저평가 & 저점 판단 지표 (100% 무료 데이터)")
+    tab_m1, tab_m2, tab_m3, tab_m4 = st.tabs(["200주 이동평균선", "주봉 RSI", "MVRV 비율 (온체인)", "NUPL 미실현순손익 (온체인)"])
+
+    df_weekly = get_btc_weekly_indicators()
+    df_onchain = get_coinmetrics_onchain_data()
+
+    with tab_m1:
+        if not df_weekly.empty:
+            st.caption("💡 **200주 이동평균선**: 역사적 사이클 하락장에서 비트코인의 최후 바닥 역할을 해온 선입니다. (빨간 점선 근처 진입 시 극저점)")
+            chart_data = df_weekly.reset_index()
+            c1 = alt.Chart(chart_data).mark_line(color='#1f77b4').encode(x='Date:T', y=alt.Y('Close:Q', scale=alt.Scale(type='log'), title='비트코인 가격 ($)'))
+            c2 = alt.Chart(chart_data).mark_line(color='#d32f2f', strokeDash=[4, 4]).encode(x='Date:T', y=alt.Y('200W_MA:Q', scale=alt.Scale(type='log')))
+            st.altair_chart((c1 + c2).properties(height=350), use_container_width=True)
+        else:
+            st.info("주봉 데이터를 계산 중입니다...")
+
+    with tab_m2:
+        if not df_weekly.empty:
+            st.caption("💡 **주봉 RSI**: 30 이하 진입 시 대중의 투매가 발생한 사이클 최저점 구간입니다.")
+            chart_rsi = df_weekly.reset_index()
+            r_chart = alt.Chart(chart_rsi).mark_line(color='#8e44ad').encode(
+                x='Date:T', y=alt.Y('Weekly_RSI:Q', scale=alt.Scale(domain=[10, 90]), title='RSI 수치')
+            ).properties(height=300)
+            st.altair_chart(r_chart, use_container_width=True)
+        else:
+            st.info("RSI 지표를 계산 중입니다...")
+
+    with tab_m3:
+        if not df_onchain.empty:
+            st.caption("💡 **MVRV 비율 (CoinMetrics API)**: 시가총액 / 실현시가총액. **1.0 이하**는 시장 전체가 손실을 보고 있는 저평가 구간입니다.")
+            df_mvrv = df_onchain.reset_index()
+            mvrv_chart = alt.Chart(df_mvrv).mark_line(color='#27ae60').encode(
+                x='time:T', y=alt.Y('MVRV:Q', title='MVRV')
+            ).properties(height=300)
+            st.altair_chart(mvrv_chart, use_container_width=True)
+        else:
+            st.info("온체인 MVRV 데이터를 불러오는 중입니다...")
+
+    with tab_m4:
+        if not df_onchain.empty:
+            st.caption("💡 **NUPL (Net Unrealized Profit/Loss)**: 미실현 순손익. **0 이하(음수)** 진입 시 시장 참여자 전체가 손실 상태에 빠진 '항복(Capitulation)' 저점 구간입니다.")
+            df_nupl = df_onchain.reset_index()
+            nupl_chart = alt.Chart(df_nupl).mark_line(color='#e67e22').encode(
+                x='time:T', y=alt.Y('NUPL:Q', title='NUPL')
+            ).properties(height=300)
+            st.altair_chart(nupl_chart, use_container_width=True)
+        else:
+            st.info("온체인 NUPL 데이터를 불러오는 중입니다...")
+
 else:
-    st.error("가상자산 데이터를 불러오는 데 실패했습니다.")
+    st.warning("⚠️ 가상자산 시세를 연결하는 중입니다. [데이터 새로고침]을 클릭해주세요.")
 
 st.markdown("---")
 
@@ -534,7 +669,6 @@ else:
                 hy_val = hy_info.get('price', 'N/A')
                 dxy_val = macro_info.get('달러 인덱스', {}).get('price', 'N/A')
                 
-                # 가상자산 데이터 확인
                 btc_price = crypto_data['btc_krw'] if crypto_data else "N/A"
                 crypto_fng = crypto_fng_score if crypto_fng_score else "N/A"
                 
