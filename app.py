@@ -44,8 +44,8 @@ st.sidebar.markdown("### 📌 수집 지표 및 출처")
 st.sidebar.caption("""
 • **가상자산 시세/온체인**: Upbit, Binance, CoinMetrics (Open API)
 • **미 3대 지수**: Yahoo Finance
-• **Shiller CAPE**: multpl.com
-• **증시 공포·탐욕 지수**: CNN Business
+• **Shiller CAPE**: multpl.com (차단 우회 적용)
+• **증시 공포·탐욕 지수**: CNN Business (실시간 연동)
 • **미 국채 금리**: St. Louis 연준 FRED
 • **거시 유동성**: WTI, Brent, VIX, DXY, High Yield Spread
 • **M7 실적/PER**: Yahoo Finance
@@ -155,10 +155,8 @@ def get_btc_weekly_indicators():
             df = df[['Close']]
             
         df = df.dropna()
-        # 200주 이동평균선
         df['200W_MA'] = df['Close'].rolling(window=200).mean()
         
-        # 주봉 RSI (14주)
         delta = df['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
@@ -186,10 +184,7 @@ def get_coinmetrics_onchain_data():
         df['CapRealUSD'] = pd.to_numeric(df['CapRealUSD'], errors='coerce')
         df = df.dropna()
         
-        # MVRV = 시가총액 / 실현시가총액
         df['MVRV'] = df['CapMrktCurUSD'] / df['CapRealUSD']
-        
-        # NUPL = (시가총액 - 실현시가총액) / 시가총액
         df['NUPL'] = (df['CapMrktCurUSD'] - df['CapRealUSD']) / df['CapMrktCurUSD']
         
         return df
@@ -221,33 +216,63 @@ def get_us_indices():
             data[name] = {"price": 0.0, "change": 0.0, "pct": 0.0, "df_1m": pd.DataFrame(), "link": link}
     return data
 
-@st.cache_data(ttl=86400)
+@st.cache_data(ttl=3600)
 def get_shiller_cape():
+    """multpl.com에서 실시간 S&P 500 Shiller CAPE Ratio 수집 (차단 우회 강화)"""
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5'
+    }
     try:
-        url = "https://www.multpl.com/shiller-cape"
-        headers = {'User-Agent': 'Mozilla/5.0'}
+        url = "https://www.multpl.com/shiller-pe"
         res = requests.get(url, headers=headers, timeout=5)
-        tables = pd.read_html(res.text)
-        cape_val = float(tables[0].iloc[0, 1].split()[0])
-        return cape_val
+        if res.status_code == 200:
+            tables = pd.read_html(res.text)
+            cape_val = float(tables[0].iloc[0, 1].split()[0])
+            return cape_val
     except Exception:
-        return 35.0
+        pass
+
+    try:
+        url_backup = "https://www.multpl.com/shiller-pe/table/by-month"
+        res = requests.get(url_backup, headers=headers, timeout=5)
+        if res.status_code == 200:
+            tables = pd.read_html(res.text)
+            cape_val = float(tables[0].iloc[0, 1])
+            return cape_val
+    except Exception:
+        pass
+
+    return 36.5
 
 @st.cache_data(ttl=1800)
 def get_fear_and_greed():
+    """CNN 공식 내부 JSON 엔드포인트에서 실시간 미 증시 공포·탐욕 지수 수집"""
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'application/json, text/plain, */*',
+        'Referer': 'https://edition.cnn.com/markets/fear-and-greed'
+    }
     try:
         url = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        res = requests.get(url, headers=headers, timeout=5).json()
-        score = round(res['fear_and_greed']['score'], 1)
-        rating_raw = res['fear_and_greed']['rating'].lower()
-        rating_map = {
-            'extreme fear': '극도의 공포 😱', 'fear': '공포 😨',
-            'neutral': '중립 😐', 'greed': '탐욕 😋', 'extreme greed': '극도의 탐욕 🤑'
-        }
-        return score, rating_map.get(rating_raw, rating_raw)
+        res = requests.get(url, headers=headers, timeout=5)
+        if res.status_code == 200:
+            data = res.json()
+            score = round(data['fear_and_greed']['score'], 1)
+            rating_raw = data['fear_and_greed']['rating'].lower()
+            rating_map = {
+                'extreme fear': '극도의 공포 😱',
+                'fear': '공포 😨',
+                'neutral': '중립 😐',
+                'greed': '탐욕 😋',
+                'extreme greed': '극도의 탐욕 🤑'
+            }
+            return score, rating_map.get(rating_raw, rating_raw)
     except Exception:
-        return 50.0, "중립 😐"
+        pass
+
+    return 50.0, "중립 😐"
 
 @st.cache_data(ttl=3600)
 def get_fred_treasury_data():
@@ -444,7 +469,7 @@ def render_custom_line_chart(df, value_col='Close', min_y=None, line_color='#1f7
 # =========================================================
 
 # ---------------------------------------------------------
-# 1. 🪙 가상자산 핵심 지표 및 온체인/가격 저평가 분석
+# 1. 🪙 가상자산 핵심 지표 및 저점/저평가 진단
 # ---------------------------------------------------------
 st.markdown("<div class='section-title'>🪙 가상자산 핵심 지표 및 저점/저평가 진단</div>", unsafe_allow_html=True)
 crypto_data = get_crypto_extended_data()
@@ -473,7 +498,6 @@ if crypto_data and crypto_data.get('btc_krw', 0) > 0:
     with cc5:
         st.metric("크립토 공포·탐욕", f"{crypto_fng_score} / 100", crypto_fng_rating, delta_color="normal" if crypto_fng_score > 50 else "inverse")
 
-    # 4대 저평가/저점 지표 시각화 (100% 무료 연동)
     st.markdown("#### 📊 비트코인 장기 저평가 & 저점 판단 지표 (100% 무료 데이터)")
     tab_m1, tab_m2, tab_m3, tab_m4 = st.tabs(["200주 이동평균선", "주봉 RSI", "MVRV 비율 (온체인)", "NUPL 미실현순손익 (온체인)"])
 
@@ -482,7 +506,7 @@ if crypto_data and crypto_data.get('btc_krw', 0) > 0:
 
     with tab_m1:
         if not df_weekly.empty:
-            st.caption("💡 **200주 이동평균선**: 역사적 사이클 하락장에서 비트코인의 최후 바닥 역할을 해온 선입니다. (빨간 점선 근처 진입 시 극저점)")
+            st.caption("💡 **200주 이동평균선**: 역사적 사이클 하락장에서 비트코인의 최후 바닥 역할을 해온 선입니다.")
             chart_data = df_weekly.reset_index()
             c1 = alt.Chart(chart_data).mark_line(color='#1f77b4').encode(x='Date:T', y=alt.Y('Close:Q', scale=alt.Scale(type='log'), title='비트코인 가격 ($)'))
             c2 = alt.Chart(chart_data).mark_line(color='#d32f2f', strokeDash=[4, 4]).encode(x='Date:T', y=alt.Y('200W_MA:Q', scale=alt.Scale(type='log')))
@@ -503,7 +527,7 @@ if crypto_data and crypto_data.get('btc_krw', 0) > 0:
 
     with tab_m3:
         if not df_onchain.empty:
-            st.caption("💡 **MVRV 비율 (CoinMetrics API)**: 시가총액 / 실현시가총액. **1.0 이하**는 시장 전체가 손실을 보고 있는 저평가 구간입니다.")
+            st.caption("💡 **MVRV 비율 (CoinMetrics API)**: 시가총액 / 실현시가총액. **1.0 이하**는 저평가 구간입니다.")
             df_mvrv = df_onchain.reset_index()
             mvrv_chart = alt.Chart(df_mvrv).mark_line(color='#27ae60').encode(
                 x='time:T', y=alt.Y('MVRV:Q', title='MVRV')
@@ -514,7 +538,7 @@ if crypto_data and crypto_data.get('btc_krw', 0) > 0:
 
     with tab_m4:
         if not df_onchain.empty:
-            st.caption("💡 **NUPL (Net Unrealized Profit/Loss)**: 미실현 순손익. **0 이하(음수)** 진입 시 시장 참여자 전체가 손실 상태에 빠진 '항복(Capitulation)' 저점 구간입니다.")
+            st.caption("💡 **NUPL (Net Unrealized Profit/Loss)**: 미실현 순손익. **0 이하(음수)** 진입 시 항복 구간입니다.")
             df_nupl = df_onchain.reset_index()
             nupl_chart = alt.Chart(df_nupl).mark_line(color='#e67e22').encode(
                 x='time:T', y=alt.Y('NUPL:Q', title='NUPL')
@@ -568,76 +592,54 @@ else:
 st.markdown("---")
 
 # ---------------------------------------------------------
-# 4. 증시 밸류에이션 및 투자 심리
+# 4. 증시 밸류에이션 및 투자 심리 (실시간 연동 적용)
 # ---------------------------------------------------------
-st.cache_data(ttl=3600)  # CAPE 지수는 하루 단위 업데이트되므로 1시간 캐싱
-def get_shiller_cape():
-    """multpl.com에서 실시간 S&P 500 Shiller CAPE Ratio 수집 (차단 우회 강화)"""
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.5'
-    }
-    
-    # 1차 시도: 메인 페이지 크롤링
-    try:
-        url = "https://www.multpl.com/shiller-pe"
-        res = requests.get(url, headers=headers, timeout=5)
-        if res.status_code == 200:
-            tables = pd.read_html(res.text)
-            # 첫 번째 테이블 또는 페이지 내에서 수치 추출
-            cape_val = float(tables[0].iloc[0, 1].split()[0])
-            return cape_val
-    except Exception:
-        pass
+st.markdown("<div class='section-title'>🏛️ 증시 밸류에이션 및 투자 심리 지표</div>", unsafe_allow_html=True)
+cape_val = get_shiller_cape()
+fg_score, fg_rating = get_fear_and_greed()
 
-    # 2차 시도: 월별 테이블 백업 경로 크롤링
-    try:
-        url_backup = "https://www.multpl.com/shiller-pe/table/by-month"
-        res = requests.get(url_backup, headers=headers, timeout=5)
-        if res.status_code == 200:
-            tables = pd.read_html(res.text)
-            df_table = tables[0]
-            cape_val = float(df_table.iloc[0, 1])
-            return cape_val
-    except Exception:
-        pass
+k1, k2, k3 = st.columns([1.2, 1.2, 2.6])
+with k1:
+    st.metric("S&P 500 Shiller CAPE", f"{cape_val:.2f}", "역사적 고평가" if cape_val > 30 else ("보통" if cape_val > 20 else "저평가"), delta_color="inverse" if cape_val > 30 else "normal")
+    st.markdown("[🔗 multpl.com 원본](https://www.multpl.com/shiller-cape)", unsafe_allow_html=True)
+with k2:
+    st.metric("미 증시 공포·탐욕 지수", f"{fg_score} / 100", fg_rating, delta_color="normal" if fg_score > 50 else "inverse")
+    st.markdown("[🔗 CNN Fear & Greed 원본](https://edition.cnn.com/markets/fear-and-greed)", unsafe_allow_html=True)
+with k3:
+    st.info(f"💡 **가이드**: \n• **Shiller CAPE ({cape_val:.2f})**: 30 이상 시 장기 고평가 구간.\n• **공포·탐욕 지수 ({fg_score} - {fg_rating})**: 0~25(극도의 공포), 75~100(극도의 탐욕).")
+st.markdown("---")
 
-    # 파싱 실패 시 최근 수치 기준 유연한 예외 처리
-    return 40.5
+# ---------------------------------------------------------
+# 5. 미 국채 만기별 금리 섹션
+# ---------------------------------------------------------
+st.markdown("<div class='section-title'>🇺🇸 미 국채 만기별 금리 현황 (최근 1개월 추이, Y축 최저 3.0% 고정)</div>", unsafe_allow_html=True)
+treasury_data = get_fred_treasury_data()
+t_cols = st.columns(4)
+for col, name in zip(t_cols, ['미 국채 2년물', '미 국채 5년물', '미 국채 10년물', '미 국채 30년물']):
+    info = treasury_data.get(name, {})
+    with col:
+        st.metric(name, f"{info.get('price', 0):.2f}%", f"{info.get('pct', 0):+.2f}%")
+        render_custom_line_chart(info.get('df_1m', pd.DataFrame()), min_y=3.0)
+        st.markdown(f"[🔗 FRED 공식 데이터]({info.get('link')})", unsafe_allow_html=True)
+st.markdown("---")
 
-
-st.cache_data(ttl=1800)  # 공포 탐욕 지수는 30분 단위 캐싱
-def get_fear_and_greed():
-    """CNN 공식 내부 JSON 엔드포인트에서 실시간 미 증시 공포·탐욕 지수 수집"""
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'application/json, text/plain, */*',
-        'Referer': 'https://edition.cnn.com/markets/fear-and-greed'
-    }
-    
-    try:
-        url = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
-        res = requests.get(url, headers=headers, timeout=5)
-        
-        if res.status_code == 200:
-            data = res.json()
-            score = round(data['fear_and_greed']['score'], 1)
-            rating_raw = data['fear_and_greed']['rating'].lower()
-            
-            rating_map = {
-                'extreme fear': '극도의 공포 😱',
-                'fear': '공포 😨',
-                'neutral': '중립 😐',
-                'greed': '탐욕 😋',
-                'extreme greed': '극도의 탐욕 🤑'
-            }
-            rating_kr = rating_map.get(rating_raw, rating_raw)
-            return score, rating_kr
-    except Exception:
-        pass
-
-    return 50.0, "중립 😐"
+# ---------------------------------------------------------
+# 6. 유동성 & 신용 위험 지표 섹션
+# ---------------------------------------------------------
+st.markdown("<div class='section-title'>💧 유동성 및 신용 위험 지표</div>", unsafe_allow_html=True)
+hy_info = get_hy_spread()
+macro_info = get_macro_data()
+m1, m2, m3, m4, m5 = st.columns(5)
+with m1:
+    st.metric("하이일드 스프레드", f"{hy_info.get('price', 0):.2f}%p", f"{hy_info.get('pct', 0):+.2f}%")
+    render_custom_line_chart(hy_info.get('df_1m', pd.DataFrame()), min_y=2.0)
+    st.markdown(f"[🔗 FRED 공식 데이터]({hy_info.get('link')})", unsafe_allow_html=True)
+for col, key, label, fmt in zip([m2, m3, m4, m5], ['달러 인덱스', 'VIX 지수', 'WTI 유가', '브렌트유'], ['달러 인덱스 (DXY)', 'VIX 변동성', 'WTI 유가 ($)', '브렌트유 ($)'], ["{:.2f}", "{:.2f}", "${:.2f}", "${:.2f}"]):
+    v = macro_info.get(key, {})
+    with col:
+        st.metric(label, fmt.format(v.get('price', 0)), f"{v.get('pct', 0):+.2f}%")
+        st.markdown(f"[🔗 Yahoo {key.split()[0]}]({v.get('link')})", unsafe_allow_html=True)
+st.markdown("---")
 
 # ---------------------------------------------------------
 # 7. M7 Drawdown & PER 현황
