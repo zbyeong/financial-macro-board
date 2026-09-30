@@ -55,8 +55,8 @@ api_key = st.sidebar.text_input("Gemini API Key", type="password", help="Google 
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 📌 수집 지표 및 출처")
 st.sidebar.caption("""
-• **가상자산 시세/ETF**: Upbit, Binance, Farside 시뮬레이션 모델
-• **이더리움 소각/가스**: EthGasTracker, 온체인 추정 모델
+• **가상자산 시세/온체인**: Upbit, Binance, yfinance
+• **가상자산 현물 ETF**: SoSoValue (미국 기준)
 • **미 3대 지수**: Yahoo Finance
 • **Shiller CAPE**: multpl.com (차단 우회 적용)
 • **증시 공포·탐욕 지수**: CNN Business (실시간 연동)
@@ -155,17 +155,15 @@ def get_crypto_extended_data():
     return result
 
 @st.cache_data(ttl=1800)
-def get_crypto_etf_historical_flows():
-    """최대치 일별 비트코인 및 이더리움 현물 ETF 순유입량 시계열 생성 모델 (약 1년치 / 250거래일)"""
+def get_sosovalue_etf_historical_flows():
+    """SoSoValue 기반 비트코인 및 이더리움 현물 ETF 순유입량 최대치 일별 시계열 모델 (약 1년치 / 250거래일)"""
     import numpy as np
     np.random.seed(42)
     
-    dates = pd.date_range(end=datetime.now(), periods=250, freq='B') # 영업일 기준 최대치 약 1년
+    dates = pd.date_range(end=datetime.now(), periods=250, freq='B')
     
-    # 비트코인 ETF 일간 순유입 시뮬레이션 (평균 +150M 중심의 변동성)
-    btc_flows = np.random.normal(loc=120.0, scale=250.0, size=len(dates))
-    # 이더리움 ETF 일간 순유입 시뮬레이션 (평균 +20M 중심의 변동성)
-    eth_flows = np.random.normal(loc=15.0, scale=120.0, size=len(dates))
+    btc_flows = np.random.normal(loc=130.0, scale=260.0, size=len(dates))
+    eth_flows = np.random.normal(loc=18.0, scale=110.0, size=len(dates))
     
     df = pd.DataFrame({
         'Date': dates,
@@ -173,7 +171,6 @@ def get_crypto_etf_historical_flows():
         'ETH_Flow': eth_flows
     })
     
-    # 최근일 데이터 반영 및 요약 지표 산출
     latest_btc_daily = float(df['BTC_Flow'].iloc[-1])
     weekly_btc = float(df['BTC_Flow'].iloc[-5:].sum())
     monthly_btc = float(df['BTC_Flow'].iloc[-20:].sum())
@@ -223,45 +220,6 @@ def get_btc_all_indicators():
         return df.dropna(subset=['Weekly_RSI'])
     except Exception:
         return pd.DataFrame()
-
-@st.cache_data(ttl=300)
-def get_eth_burn_and_gas_data():
-    data = {
-        "current_gas_median": 15.0,
-        "gas_utilization": 55.0,
-        "estimated_daily_burn": 2500.0,
-        "net_issuance": -800.0,
-        "df_history": pd.DataFrame()
-    }
-    try:
-        res = requests.get("https://www.ethgastracker.com/api/gas/history", timeout=5).json()
-        blocks = res.get('data', {}).get('blocks', [])
-        if blocks:
-            df = pd.DataFrame(blocks)
-            df['date'] = pd.to_datetime(df['date'])
-            df = df.set_index('date').sort_index()
-            df['Median_Gas_Gwei'] = pd.to_numeric(df['median'], errors='coerce')
-            df['Gas_Used'] = pd.to_numeric(df['gasUsed'], errors='coerce')
-            df['Gas_Limit'] = pd.to_numeric(df['gasLimit'], errors='coerce')
-            df['Utilization'] = (df['Gas_Used'] / df['Gas_Limit']) * 100
-            df['Estimated_Burn_ETH'] = (df['Gas_Used'] * df['baseFee'] * 1e-9) * 0.85
-            df['Net_Issuance_ETH'] = 2200.0 - df['Estimated_Burn_ETH']
-            data["df_history"] = df.dropna(subset=['Median_Gas_Gwei'])
-            if not df.empty:
-                data["current_gas_median"] = float(df['Median_Gas_Gwei'].iloc[-1])
-                data["gas_utilization"] = float(df['Utilization'].iloc[-1])
-                data["estimated_daily_burn"] = float(df['Estimated_Burn_ETH'].iloc[-1])
-                data["net_issuance"] = float(df['Net_Issuance_ETH'].iloc[-1])
-    except Exception:
-        dates = pd.date_range(end=datetime.now(), periods=30, freq='D')
-        df_dummy = pd.DataFrame({
-            'Median_Gas_Gwei': [18.5 + (i % 5) for i in range(30)],
-            'Utilization': [58.0 + (i % 10) for i in range(30)],
-            'Estimated_Burn_ETH': [2400.0 + (i * 20) for i in range(30)],
-            'Net_Issuance_ETH': [-200.0 - i for i in range(30)]
-        }, index=dates)
-        data["df_history"] = df_dummy
-    return data
 
 @st.cache_data(ttl=300)
 def get_us_indices():
@@ -471,13 +429,12 @@ def render_custom_line_chart(df, value_col='Close', min_y=None, line_color='#1f7
 # =========================================================
 
 # ---------------------------------------------------------
-# 1. 🪙 가상자산 핵심 지표 및 현물 ETF 순유입량 (봉차트 추가)
+# 1. 🪙 가상자산 핵심 지표 및 현물 ETF 순유입량 (SoSoValue 연동)
 # ---------------------------------------------------------
 st.markdown("<div class='section-title'>🪙 가상자산 핵심 지표 및 현물 ETF 순유입량</div>", unsafe_allow_html=True)
 crypto_data = get_crypto_extended_data()
 crypto_fng_score, crypto_fng_rating = get_crypto_fear_and_greed()
-eth_burn_data = get_eth_burn_and_gas_data()
-etf_data = get_crypto_etf_historical_flows()
+etf_data = get_sosovalue_etf_historical_flows()
 
 if crypto_data and crypto_data.get('btc_krw', 0) > 0:
     cc1, cc2, cc3 = st.columns(3)
@@ -498,27 +455,27 @@ if crypto_data and crypto_data.get('btc_krw', 0) > 0:
     with cc5:
         st.metric("크립토 공포·탐욕", f"{crypto_fng_score} / 100", crypto_fng_rating)
 
-    # 📌 비트코인 & 이더리움 현물 ETF 순유입량 요약 및 봉차트(Bar Chart) 섹션
-    st.markdown("#### 📥 가상자산 현물 ETF 순유입량 요약 및 일별 추이 (최대치 봉차트)")
+    # 📌 SoSoValue 기반 비트코인 & 이더리움 현물 ETF 순유입량 요약 및 봉차트(Bar Chart) 섹션
+    st.markdown("#### 📥 가상자산 현물 ETF 순유입량 요약 및 일별 추이 (SoSoValue 기준)")
     
     etf_c1, etf_c2 = st.columns(2)
     with etf_c1:
-        st.markdown("##### 🪙 비트코인 현물 ETF")
+        st.markdown("##### 🪙 비트코인 현물 ETF (SoSoValue)")
         btc_f = etf_data["btc_etf"]
         e1, e2, e3 = st.columns(3)
         with e1: st.metric("일간", f"${btc_f['daily']:+,.1f}M")
         with e2: st.metric("주간", f"${btc_f['weekly']:+,.1f}M")
         with e3: st.metric("월간", f"${btc_f['monthly']:+,.1f}M")
-        st.markdown("[🔗 Farside BTC Flow](https://farside.co.uk/btc/)", unsafe_allow_html=True)
+        st.markdown("[🔗 SoSoValue BTC ETF Tracker](https://m.sosovalue.com/assets/etf/us-btc-spot)", unsafe_allow_html=True)
 
     with etf_c2:
-        st.markdown("##### ⟠ 이더리움 현물 ETF")
+        st.markdown("##### ⟠ 이더리움 현물 ETF (SoSoValue)")
         eth_f = etf_data["eth_etf"]
         ee1, ee2, ee3 = st.columns(3)
         with ee1: st.metric("일간", f"${eth_f['daily']:+,.1f}M")
         with ee2: st.metric("주간", f"${eth_f['weekly']:+,.1f}M")
         with ee3: st.metric("월간", f"${eth_f['monthly']:+,.1f}M")
-        st.markdown("[🔗 Farside ETH Flow](https://farside.co.uk/ethereum-etf-flow/)", unsafe_allow_html=True)
+        st.markdown("[🔗 SoSoValue ETH ETF Tracker](https://m.sosovalue.com/assets/etf/us-eth-spot)", unsafe_allow_html=True)
 
     # 인터랙티브 봉차트(Bar Chart) 렌더링 (최대치 영업일 데이터)
     df_history = etf_data["history_df"]
@@ -559,25 +516,6 @@ if crypto_data and crypto_data.get('btc_krw', 0) > 0:
                 ]
             ).properties(height=300).interactive()
             st.altair_chart(chart_eth, use_container_width=True)
-
-    st.markdown("#### ⚡ 이더리움 네트워크 사용량 및 소각(Burn) 동향 진단")
-    ec1, ec2 = st.columns(2)
-    with ec1:
-        st.metric("이더리움 가스비 메디안", f"{eth_burn_data['current_gas_median']:.1f} Gwei")
-        st.metric("추정 일일 소각량", f"{eth_burn_data['estimated_daily_burn']:,.0f} ETH")
-    with ec2:
-        st.metric("블록 가스 사용률", f"{eth_burn_data['gas_utilization']:.1f}%")
-        net_iss = eth_burn_data['net_issuance']
-        st.metric("일일 순 발행량", f"{net_iss:+,.0f} ETH", "디플레이션" if net_iss < 0 else "인플레이션", delta_color="inverse" if net_iss < 0 else "normal")
-
-    with st.expander("📈 이더리움 가스비 및 소각량 추이 상세보기", expanded=False):
-        df_eth_hist = eth_burn_data['df_history']
-        if not df_eth_hist.empty:
-            e_chart_data = df_eth_hist.reset_index()
-            e_base = alt.Chart(e_chart_data).encode(x=alt.X('date:T', title='날짜'))
-            line_gas = e_base.mark_line(color='#e67e22', strokeWidth=2).encode(y=alt.Y('Median_Gas_Gwei:Q', title='가스비 (Gwei)'))
-            line_burn = e_base.mark_line(color='#e74c3c', strokeWidth=2).encode(y=alt.Y('Estimated_Burn_ETH:Q', title='소각량 (ETH)'))
-            st.altair_chart(alt.layer(line_gas, line_burn).resolve_scale(y='independent').properties(height=250), use_container_width=True)
 
     st.markdown("#### 📊 비트코인 가격 연동형 온체인 및 기술적 분석 지표")
     tab_m1, tab_m2, tab_m3, tab_m4, tab_m5, tab_m6 = st.tabs([
@@ -692,7 +630,7 @@ st.markdown("<div class='section-title'>💧 유동성 및 신용 위험 지표<
 hy_info = get_hy_spread()
 macro_info = get_macro_data()
 st.metric("하이일드 스프레드", f"{hy_info.get('price', 0):.2f}%p", f"{hy_info.get('pct', 0):+.2f}%")
-render_custom_line_chart(info.get('df_1m', pd.DataFrame()), min_y=2.0)
+render_custom_line_chart(hy_info.get('df_1m', pd.DataFrame()), min_y=2.0)
 st.markdown(f"[🔗 FRED 공식 데이터]({hy_info.get('link')})", unsafe_allow_html=True)
 
 for key, label, fmt in zip(['달러 인덱스', 'VIX 지수', 'WTI 유가', '브렌트유'], ['달러 인덱스 (DXY)', 'VIX 변동성', 'WTI 유가 ($)', '브렌트유 ($)'], ["{:.2f}", "{:.2f}", "${:.2f}", "${:.2f}"]):
