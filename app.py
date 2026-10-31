@@ -107,7 +107,6 @@ def get_crypto_extended_data():
         "btc_krw": 0, "btc_pct": 0.0,
         "eth_krw": 0, "eth_pct": 0.0,
         "kimchi_premium": None,
-        "funding_rate": None,
         "binance_btc_usd": None,
         "usdkrw": 1380.0
     }
@@ -150,12 +149,6 @@ def get_crypto_extended_data():
 
     result["binance_btc_usd"] = btc_usd
 
-    try:
-        funding_url = "https://fapi.binance.com/fapi/v1/premiumIndex?symbol=BTCUSDT"
-        funding_res = requests.get(funding_url, timeout=5).json()
-        result["funding_rate"] = float(funding_res['lastFundingRate']) * 100
-    except Exception:
-        result["funding_rate"] = None
 
     if result["btc_krw"] > 0 and btc_usd and result["usdkrw"] > 0:
         global_btc_krw = btc_usd * result["usdkrw"]
@@ -550,85 +543,81 @@ def build_macro_assessment(us_indices, cape_value, stock_fg_score, treasury_data
     """외부 생성형 AI 없이 수집 지표와 공개된 임계값으로 재현 가능한 시황 점검을 생성."""
     score = 0
     evaluated = 0
-    positives, cautions = [], []
+    positives, cautions, observations = [], [], []
 
-    def assess(value, positive_condition, negative_condition, positive_text, negative_text):
+    def assess(name, value, positive_condition, negative_condition, positive_text, negative_text, unit=""):
         nonlocal score, evaluated
         value = safe_number(value)
         if value is None:
+            observations.append(f"{name}: 데이터 없음 (종합 점수에서 제외)")
             return
+
         evaluated += 1
+        formatted_value = f"{value:,.2f}{unit}"
         if positive_condition(value):
             score += 1
             positives.append(positive_text)
+            observations.append(f"{name} ({formatted_value}) — 우호: {positive_text}")
         elif negative_condition(value):
             score -= 1
             cautions.append(negative_text)
+            observations.append(f"{name} ({formatted_value}) — 경계: {negative_text}")
         else:
-            pass
+            observations.append(f"{name} ({formatted_value}) — 중립: 설정된 우호·경계 임계값에 해당하지 않습니다.")
 
     assess(
-        us_indices.get("S&P 500", {}).get("pct"),
-        lambda v: v >= 0.5,
-        lambda v: v <= -0.5,
+        "S&P 500 일간 등락률", us_indices.get("S&P 500", {}).get("pct"),
+        lambda v: v >= 0.5, lambda v: v <= -0.5,
         "S&P 500의 당일 흐름이 강세(상승률 +0.5% 이상)입니다.",
-        "S&P 500의 당일 흐름이 약세(하락률 -0.5% 이하)입니다.",
+        "S&P 500의 당일 흐름이 약세(하락률 -0.5% 이하)입니다.", "%",
     )
     assess(
-        us_indices.get("나스닥 종합 (NASDAQ)", {}).get("pct"),
-        lambda v: v >= 0.5,
-        lambda v: v <= -0.5,
+        "나스닥 일간 등락률", us_indices.get("나스닥 종합 (NASDAQ)", {}).get("pct"),
+        lambda v: v >= 0.5, lambda v: v <= -0.5,
         "나스닥의 당일 흐름이 강세(상승률 +0.5% 이상)입니다.",
-        "나스닥의 당일 흐름이 약세(하락률 -0.5% 이하)입니다.",
+        "나스닥의 당일 흐름이 약세(하락률 -0.5% 이하)입니다.", "%",
     )
     assess(
-        macro_info.get("VIX 지수", {}).get("price"),
-        lambda v: v < 18,
-        lambda v: v >= 25,
+        "VIX", macro_info.get("VIX 지수", {}).get("price"),
+        lambda v: v < 18, lambda v: v >= 25,
         "VIX가 18 미만으로 변동성 부담이 비교적 낮습니다.",
         "VIX가 25 이상으로 위험회피 심리가 커져 있습니다.",
     )
     assess(
-        hy_info.get("price"),
-        lambda v: v < 3.5,
-        lambda v: v >= 5.0,
+        "하이일드 스프레드", hy_info.get("price"),
+        lambda v: v < 3.5, lambda v: v >= 5.0,
         "하이일드 스프레드가 3.5%p 미만으로 신용시장 긴장이 낮은 편입니다.",
-        "하이일드 스프레드가 5.0%p 이상으로 신용위험 경계가 필요합니다.",
+        "하이일드 스프레드가 5.0%p 이상으로 신용위험 경계가 필요합니다.", "%p",
     )
     assess(
-        treasury_data.get("미 국채 10년물-2년물 금리차", {}).get("price"),
-        lambda v: v > 0.25,
-        lambda v: v < -0.25,
+        "미 국채 10년물-2년물 금리차", treasury_data.get("미 국채 10년물-2년물 금리차", {}).get("price"),
+        lambda v: v > 0.25, lambda v: v < -0.25,
         "10년물-2년물 금리차가 +0.25%p를 넘어 장단기 금리곡선이 정상 구간입니다.",
-        "10년물-2년물 금리차가 -0.25%p 미만으로 역전 폭이 유의미합니다.",
+        "10년물-2년물 금리차가 -0.25%p 미만으로 역전 폭이 유의미합니다.", "%p",
     )
     assess(
-        stock_fg_score,
-        lambda v: 45 <= v <= 65,
-        lambda v: v < 20 or v > 80,
+        "미 증시 공포·탐욕 지수", stock_fg_score,
+        lambda v: 45 <= v <= 65, lambda v: v < 20 or v > 80,
         "미 증시 공포·탐욕 지수가 45~65로 중립에 가까운 심리입니다.",
-        "미 증시 투자심리가 극단(20 미만 공포 또는 80 초과 탐욕)에 치우쳐 있습니다.",
+        "미 증시 투자심리가 극단(20 미만 공포 또는 80 초과 탐욕)에 치우쳐 있습니다.", "/100",
     )
     assess(
-        cape_value,
-        lambda v: v < 25,
-        lambda v: v >= 35,
+        "Shiller CAPE", cape_value,
+        lambda v: v < 25, lambda v: v >= 35,
         "Shiller CAPE가 25 미만으로 장기 밸류에이션 부담이 상대적으로 낮습니다.",
         "Shiller CAPE가 35 이상으로 장기 밸류에이션 부담이 큰 구간입니다.",
     )
     assess(
-        macro_info.get("달러 인덱스", {}).get("pct"),
-        lambda v: v <= -0.5,
-        lambda v: v >= 0.5,
+        "달러 인덱스 일간 등락률", macro_info.get("달러 인덱스", {}).get("pct"),
+        lambda v: v <= -0.5, lambda v: v >= 0.5,
         "달러 인덱스가 하루 0.5% 이상 하락해 달러 강세 압력이 완화됐습니다.",
-        "달러 인덱스가 하루 0.5% 이상 상승해 글로벌 금융여건에 부담이 될 수 있습니다.",
+        "달러 인덱스가 하루 0.5% 이상 상승해 글로벌 금융여건에 부담이 될 수 있습니다.", "%",
     )
     assess(
-        macro_info.get("WTI 유가", {}).get("pct"),
-        lambda v: v <= -3.0,
-        lambda v: v >= 3.0,
+        "WTI 유가 일간 등락률", macro_info.get("WTI 유가", {}).get("pct"),
+        lambda v: v <= -3.0, lambda v: v >= 3.0,
         "WTI가 하루 3% 이상 하락해 에너지발 물가 압력이 완화될 여지가 있습니다.",
-        "WTI가 하루 3% 이상 상승해 인플레이션·금리 부담을 점검할 필요가 있습니다.",
+        "WTI가 하루 3% 이상 상승해 인플레이션·금리 부담을 점검할 필요가 있습니다.", "%",
     )
 
     if evaluated == 0:
@@ -652,7 +641,9 @@ def build_macro_assessment(us_indices, cape_value, stock_fg_score, treasury_data
         elif crypto_value > 80:
             crypto_note = f"크립토 공포·탐욕 지수 {crypto_value:.0f}: 극단적 탐욕 구간으로 과열 및 레버리지 쏠림을 경계해야 합니다."
         else:
-            crypto_note = f"크립토 공포·탐욕 지수 {crypto_value:.0f}: 극단 구간은 아니지만 가격·펀딩비와 함께 해석해야 합니다."
+            crypto_note = f"크립토 공포·탐욕 지수 {crypto_value:.0f}: 극단 구간은 아니지만 가격 흐름·거래량과 함께 해석해야 합니다."
+    else:
+        crypto_note = "크립토 공포·탐욕 지수: 데이터 연결 실패로 분석에서 제외했습니다."
 
     return {
         "score": score,
@@ -689,16 +680,11 @@ if crypto_data and crypto_data.get('btc_krw', 0) > 0:
         kp = crypto_data.get('kimchi_premium')
         st.metric("한국 프리미엄", f"{kp:.2f}%" if kp is not None else "N/A", delta_color="inverse" if kp is not None and kp > 5 else "normal")
 
-    cc4, cc5 = st.columns(2)
-    with cc4:
-        fr = crypto_data.get('funding_rate')
-        st.metric("바이낸스 BTC 펀딩비", f"{fr:.4f}%" if fr is not None else "N/A", delta_color="off")
-    with cc5:
-        st.metric(
-            "크립토 공포·탐욕 (CoinMarketCap)",
-            f"{crypto_fng_score} / 100" if crypto_fng_score is not None else "N/A",
-            crypto_fng_rating,
-        )
+    st.metric(
+        "크립토 공포·탐욕 (CoinMarketCap)",
+        f"{crypto_fng_score} / 100" if crypto_fng_score is not None else "N/A",
+        crypto_fng_rating,
+    )
 else:
     st.warning("⚠️ 가상자산 시세를 불러오지 못했습니다. 잠시 후 데이터 새로고침을 시도해주세요.")
     st.metric(
@@ -920,6 +906,10 @@ with right:
             st.markdown(f"- {item}")
     else:
         st.caption("현재 임계값을 충족한 경계 신호가 없습니다.")
+
+with st.expander("전체 지표별 관찰 결과"):
+    for observation in assessment["observations"]:
+        st.markdown(f"- {observation}")
 
 with st.expander("분석 기준 및 해석상 유의점"):
     st.markdown("""
